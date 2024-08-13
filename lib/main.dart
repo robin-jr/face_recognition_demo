@@ -6,6 +6,11 @@ import 'package:google_ml_kit/google_ml_kit.dart';
 import 'package:tflite_flutter/tflite_flutter.dart' as tfl;
 import 'dart:io';
 import 'dart:math';
+import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:image/image.dart' as img;
+import 'package:flutter/services.dart' show ByteData, rootBundle;
+import 'package:path/path.dart' as path;
 
 import 'package:tflite_flutter_helper_plus/tflite_flutter_helper_plus.dart';
 import 'package:tflite_flutter_helper_plus/tflite_flutter_helper_plus.dart'
@@ -39,6 +44,8 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
   Map<int, List<double>> faceEmbeddings = {};
   Map<List<double>, String> knownEmbeddings =
       {}; // In-memory database of known faces
+  List<File> croppedImages = [];
+  List<Uint8List> tensorImages = [];
 
   @override
   void initState() {
@@ -93,12 +100,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
         face.boundingBox.right,
         face.boundingBox.bottom,
       );
-      final croppedImage = _cropImage(_image!, cropRect);
+      final croppedImage = await _cropImage(_image!, cropRect);
       final faceEmbedding = await _getFaceEmbedding(croppedImage);
-      print("Face embedding: $faceEmbedding");
+      print("Face embedding: $faceEmbedding ${faceEmbeddings.toString()}");
+      print(
+          "slkadsf ${faceEmbeddings.toString()} ${knownEmbeddings.toString()}");
+      print("known embeddings: ${knownEmbeddings.toString()}");
 
       setState(() {
         faceEmbeddings[face.trackingId ?? faces.indexOf(face)] = faceEmbedding;
+        croppedImages.add(croppedImage);
       });
 
       final recognizedName = _findClosestEmbedding(faceEmbedding);
@@ -114,10 +125,78 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     }
   }
 
-  File _cropImage(File imageFile, Rect cropRect) {
-    // Implement the cropping logic or use an image cropping package
-    // Here, we'll assume the image is already cropped for simplicity
-    return imageFile;
+  Future<File> _cropImage(File imageFile, Rect cropRect) async {
+    // Load the image file
+    final image = img.decodeImage(await imageFile.readAsBytes());
+
+    if (image == null) {
+      throw Exception('Failed to decode image');
+    }
+
+    // Convert Rect to integers for cropping
+    final int left = cropRect.left.toInt();
+    final int top = cropRect.top.toInt();
+    final int width = cropRect.width.toInt();
+    final int height = cropRect.height.toInt();
+
+    // Crop the image
+    final croppedImage = img.copyCrop(image, left, top, width, height);
+
+    // Save the cropped image to a new file
+    final directory = path.dirname(imageFile.path);
+    final newFilePath = path.join(directory,
+        'cropped_${Random().nextInt(10)}_${path.basename(imageFile.path)}');
+    final newFile = File(newFilePath);
+
+    // Encode the image to PNG format
+    final croppedImageBytes = img.encodePng(croppedImage);
+
+    // Write the bytes to the new file
+    await newFile.writeAsBytes(croppedImageBytes);
+
+    print("Cropped image saved: $newFilePath");
+
+    return newFile;
+  }
+
+  bool isTwoVectorsEqual(List<double> v1, List<double> v2) {
+    for (int i = 0; i < v1.length; i++) {
+      if (v1[i] != v2[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Uint8List imageToByteListFloat32(
+      img.Image image, int inputSize, double mean, double std) {
+    var convertedBytes = Float32List(1 * inputSize * inputSize * 3);
+    var buffer = Float32List.view(convertedBytes.buffer);
+    int pixelIndex = 0;
+    for (var i = 0; i < inputSize; i++) {
+      for (var j = 0; j < inputSize; j++) {
+        var pixel = image.getPixel(j, i);
+        buffer[pixelIndex++] = (img.getRed(pixel) - mean) / std;
+        buffer[pixelIndex++] = (img.getGreen(pixel) - mean) / std;
+        buffer[pixelIndex++] = (img.getBlue(pixel) - mean) / std;
+      }
+    }
+    return convertedBytes.buffer.asUint8List();
+  }
+
+  Uint8List imageToByteListUint8(img.Image image, int inputSize) {
+    var convertedBytes = Uint8List(1 * inputSize * inputSize * 3);
+    var buffer = Uint8List.view(convertedBytes.buffer);
+    int pixelIndex = 0;
+    for (var i = 0; i < inputSize; i++) {
+      for (var j = 0; j < inputSize; j++) {
+        var pixel = image.getPixel(j, i);
+        buffer[pixelIndex++] = img.getRed(pixel);
+        buffer[pixelIndex++] = img.getGreen(pixel);
+        buffer[pixelIndex++] = img.getBlue(pixel);
+      }
+    }
+    return convertedBytes.buffer.asUint8List();
   }
 
   Future<List<double>> _getFaceEmbedding(File croppedImage) async {
@@ -125,9 +204,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     final inputImage = InputImage.fromFile(croppedImage);
     // Preprocess the image
     final tensorImage = _preprocess(inputImage);
+    // img.Image image = img.decodeImage(croppedImage.readAsBytesSync())!;
+    // img.Image image = img.decodeImage(_preprocess(inputImage))!;
+    // final tensorImage = imageToByteListUint8(image, 160);
+
+    setState(() {
+      // tensorImages.add(tensorImage);
+    });
 
     // final kkk = ResizeImage(imageProvider)
-    print("Preprocessing done ${tensorImage.getTensorBuffer().getShape()}");
+    print("Preprocessing done ${tensorImage.tensorBuffer.getShape()}");
 
     // Allocate tensors
     _interpreter.allocateTensors();
@@ -164,20 +250,22 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     print(
         "Input buffer: ${inputTensorBuffer.getShape()} okk1 aaa ${_interpreter.getInputTensor(0).shape} bbb ${_interpreter.getOutputTensor(0).shape}");
     var output = List.filled(1 * 512, 0).reshape([1, 512]);
-    var input = List.filled(1 * 160 * 160 * 3, 0).reshape([1, 160, 160, 3]);
-    // input[1] = tensorImage.getTensorBuffer().getShape();
-    int cc = 0;
-    for (int i = 0; i < 160; i++) {
-      for (int j = 0; j < 160; j++) {
-        for (int k = 0; k < 3; k++) {
-          if (cc >= inputBuffer.length) {
-            break;
-          }
-          input[0][i][j][k] = inputBuffer[cc];
-          cc += 1;
-        }
-      }
-    }
+    // var input = List.filled(1 * 160 * 160 * 3, 0).reshape([1, 160, 160, 3]);
+    // // input[1] = tensorImage.getTensorBuffer().getShape();
+    // int cc = 0;
+    // for (int i = 0; i < 160; i++) {
+    //   for (int j = 0; j < 160; j++) {
+    //     for (int k = 0; k < 3; k++) {
+    //       if (cc >= inputBuffer.length) {
+    //         break;
+    //       }
+    //       input[0][i][j][k] = inputBuffer[cc];
+    //       cc += 1;
+    //     }
+    //   }
+    // }
+    var input =
+        tensorImage.getTensorBuffer().getDoubleList().reshape([1, 160, 160, 3]);
     // Run inference
     try {
       _interpreter.run(input, output);
@@ -215,6 +303,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     String? closestPerson;
 
     knownEmbeddings.forEach((knownEmbedding, personName) {
+      print("fkkkkk ${isTwoVectorsEqual(knownEmbedding, embedding)}");
       double distance = _euclideanDistance(embedding, knownEmbedding);
       print("Distance: $distance");
       if (distance < minDistance) {
@@ -302,6 +391,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
                           ? _findClosestEmbedding(embedding)
                           : "Not recognized";
                       return ListTile(
+                        leading: croppedImages.length > index
+                            ? Image.file(croppedImages[index])
+                            : null,
                         title: Text("Face ${index + 1}: $name"),
                       );
                     },
