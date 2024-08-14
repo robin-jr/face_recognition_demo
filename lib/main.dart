@@ -50,9 +50,10 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
 
   Future<void> _loadModel() async {
     try {
-      _interpreter = await tfl.Interpreter.fromAsset('assets/facenet.tflite');
+      _interpreter =
+          await tfl.Interpreter.fromAsset('assets/efficient_net.tflite');
       print(
-          "Model loaded successfully ${_interpreter.getInputTensor(0).shape}");
+          "Model loaded successfully ${_interpreter.getInputTensor(0).shape} output ${_interpreter.getOutputTensor(0).shape}");
     } catch (e) {
       print("Error loading model: $e");
     }
@@ -194,16 +195,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     final tensorImage = _preprocess(inputImage);
     _interpreter.allocateTensors();
 
-    var output = List.filled(1 * 512, 0).reshape([1, 512]);
+    var output = List.filled(1 * 1000, 0).reshape([1, 1000]);
     var input =
-        tensorImage.getTensorBuffer().getDoubleList().reshape([1, 160, 160, 3]);
+        tensorImage.getTensorBuffer().getDoubleList().reshape([1, 224, 224, 3]);
     _interpreter.run(input, output);
 
     return output[0].cast<double>();
   }
 
   TensorImage _preprocess(InputImage inputImage) {
-    const inputSize = 160; // Match this with your model's input size
+    const inputSize = 224; // Match this with your model's input size
 
     TensorImage tensorImage = TensorImage.fromFile(File(inputImage.filePath!));
 
@@ -221,7 +222,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     String? closestPerson;
 
     knownEmbeddings.forEach((knownEmbedding, personName) {
-      double distance = _euclideanDistance(embedding, knownEmbedding);
+      double distance = _cosineSimilarity(embedding, knownEmbedding);
       if (distance < minDistance) {
         minDistance = distance;
         closestPerson = personName;
