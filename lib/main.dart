@@ -35,12 +35,9 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
   final picker = ImagePicker();
   final FaceDetector faceDetector = GoogleMlKit.vision.faceDetector();
   late tfl.Interpreter _interpreter;
-  List<Face> faces = [];
-  Map<int, List<double>> faceEmbeddings = {};
   Map<List<double>, String> knownEmbeddings =
       {}; // In-memory database of known faces
   List<File> croppedImages = [];
-  List<Uint8List> tensorImages = [];
 
   @override
   void initState() {
@@ -67,18 +64,29 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
         croppedImages.clear();
         _image = File(pickedFile.path);
       });
-      await _detectFaces();
-      await _recognizeFaces();
+      await _detectAndStoreCroppedFaces();
+      // await _cropFaces();
+      // await _recognizeFaces();
     }
   }
 
-  Future<void> _detectFaces() async {
+  Future<void> _detectAndStoreCroppedFaces() async {
     final inputImage = InputImage.fromFile(_image!);
     final detectedFaces = await faceDetector.processImage(inputImage);
 
-    setState(() {
-      faces = detectedFaces;
-    });
+    for (var face in detectedFaces) {
+      final cropRect = Rect.fromLTRB(
+        face.boundingBox.left,
+        face.boundingBox.top,
+        face.boundingBox.right,
+        face.boundingBox.bottom,
+      );
+      final croppedImage = await _cropImage(_image!, cropRect);
+
+      setState(() {
+        croppedImages.add(croppedImage);
+      });
+    }
 
     if (detectedFaces.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -87,34 +95,33 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     }
   }
 
-  Future<void> _recognizeFaces() async {
-    for (var face in faces) {
-      final cropRect = Rect.fromLTRB(
-        face.boundingBox.left,
-        face.boundingBox.top,
-        face.boundingBox.right,
-        face.boundingBox.bottom,
-      );
-      final croppedImage = await _cropImage(_image!, cropRect);
-      final faceEmbedding = await _getFaceEmbedding(croppedImage);
+  // Future<void> _cropFaces() async {
+  //   for (var face in faces) {
+  //     final cropRect = Rect.fromLTRB(
+  //       face.boundingBox.left,
+  //       face.boundingBox.top,
+  //       face.boundingBox.right,
+  //       face.boundingBox.bottom,
+  //     );
+  //     final croppedImage = await _cropImage(_image!, cropRect);
+  //     // final faceEmbedding = await _getFaceEmbedding(croppedImage);
 
-      setState(() {
-        faceEmbeddings[face.trackingId ?? faces.indexOf(face)] = faceEmbedding;
-        croppedImages.add(croppedImage);
-      });
+  //     setState(() {
+  //       croppedImages.add(croppedImage);
+  //     });
 
-      final recognizedName = _findClosestEmbedding(faceEmbedding);
+  //     // final recognizedName = _findClosestEmbedding(faceEmbedding);
 
-      if (recognizedName != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Recognized: $recognizedName")),
-        );
-      } else {
-        // Prompt the user to tag the face
-        await _showTaggingDialog(faceEmbedding);
-      }
-    }
-  }
+  //     // if (recognizedName != null) {
+  //     //   ScaffoldMessenger.of(context).showSnackBar(
+  //     //     SnackBar(content: Text("Recognized: $recognizedName")),
+  //     //   );
+  //     // } else {
+  //     //   // Prompt the user to tag the face
+  //     //   await _showTaggingDialog(faceEmbedding);
+  //     // }
+  //   }
+  // }
 
   Future<File> _cropImage(File imageFile, Rect cropRect) async {
     // Load the image file
@@ -136,7 +143,7 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
     // Save the cropped image to a new file
     final directory = path.dirname(imageFile.path);
     final newFilePath = path.join(directory,
-        'cropped_${Random().nextInt(10)}_${path.basename(imageFile.path)}');
+        'cropped_${Random().nextInt(10000)}_${path.basename(imageFile.path)}');
     final newFile = File(newFilePath);
 
     // Encode the image to PNG format
@@ -200,7 +207,16 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
         tensorImage.getTensorBuffer().getDoubleList().reshape([1, 224, 224, 3]);
     _interpreter.run(input, output);
 
+    print("Output: ${output[0].length} ${output[0]}");
     return output[0].cast<double>();
+  }
+
+  Future<Map<String, dynamic>> _getFaceRecognitionData(
+      File croppedImage) async {
+    List<double> embedding = await _getFaceEmbedding(croppedImage);
+    String closestPerson = _findClosestEmbedding(embedding) ?? "Unknown";
+    print("problems ${embedding} $closestPerson");
+    return {"embedding": embedding, "name": closestPerson};
   }
 
   TensorImage _preprocess(InputImage inputImage) {
@@ -218,11 +234,11 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
   }
 
   String? _findClosestEmbedding(List<double> embedding) {
-    double minDistance = double.infinity;
+    double minDistance = 0.019;
     String? closestPerson;
 
     knownEmbeddings.forEach((knownEmbedding, personName) {
-      double distance = _cosineSimilarity(embedding, knownEmbedding);
+      double distance = _euclideanDistance(embedding, knownEmbedding);
       if (distance < minDistance) {
         minDistance = distance;
         closestPerson = personName;
@@ -314,24 +330,42 @@ class _FaceRecognitionPageState extends State<FaceRecognitionPage> {
             child: const Text("Select Image"),
           ),
           const SizedBox(height: 20),
-          faces.isNotEmpty
+          croppedImages.isNotEmpty
               ? Container(
                   height: 400,
                   child: ListView.builder(
-                    itemCount: faces.length,
+                    itemCount: croppedImages.length,
                     itemBuilder: (context, index) {
-                      final face = faces[index];
-                      final embedding =
-                          faceEmbeddings[face.trackingId ?? index];
-                      final name = embedding != null
-                          ? _findClosestEmbedding(embedding)
-                          : "Not recognized";
-                      return ListTile(
-                        leading: croppedImages.length > index
-                            ? Image.file(croppedImages[index])
-                            : null,
-                        title: Text("Face ${index + 1}: $name"),
-                      );
+                      // final face = faces[index];
+                      // final embedding = faceEmbeddings[face.trackingId];
+                      // final name = embedding != null
+                      //     ? _findClosestEmbedding(embedding)
+                      //     : "Not recognized";
+                      File image = croppedImages[index];
+                      // final embedding = _getFaceEmbedding(image);
+                      // final name = "todo";
+                      final details = _getFaceRecognitionData(image);
+                      return FutureBuilder(
+                          future: details,
+                          key: UniqueKey(),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState !=
+                                ConnectionState.done) {
+                              return ListTile(
+                                leading: Image.file(image),
+                                title: const Text("Recognizing..."),
+                              );
+                            }
+                            return ListTile(
+                              leading: Image.file(image),
+                              title: Text(
+                                  "Face ${index + 1}: ${snapshot.data!['name']}"),
+                              onTap: () {
+                                _showTaggingDialog(snapshot.data!['embedding']
+                                    as List<double>);
+                              },
+                            );
+                          });
                     },
                   ),
                 )
